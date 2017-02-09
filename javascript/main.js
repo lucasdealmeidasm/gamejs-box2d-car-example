@@ -148,6 +148,7 @@ Wheel.prototype.killSidewaysVelocity=function(){
 
 };
 
+var carCategoryBits = 2;
 
 function Car(pars){
     /*
@@ -177,6 +178,8 @@ function Car(pars){
     this.wheel_angle=0;//keep track of current wheel angle relative to car.
                        //when steering left/right, angle will be decreased/increased gradually over 200ms to prevent jerkyness.
     
+	this.ackermann = pars.ackermann;
+	
     //initialize body
     var def=new box2d.b2BodyDef();
     def.type = box2d.b2Body.b2_dynamicBody;
@@ -189,6 +192,9 @@ function Car(pars){
     
     //initialize shape
     var fixdef= new box2d.b2FixtureDef();
+	fixdef.filter.categoryBits = carCategoryBits;
+	fixdef.filter.maskBits = 1;
+	carCategoryBits = carCategoryBits << 1;
     fixdef.density = 1.0;
     fixdef.friction = 0.3; //friction when rubbing agaisnt other shapes
     fixdef.restitution = 0.4;  //amount of force feedback when hitting something. >0 makes the car bounce off, it's fun!
@@ -270,18 +276,87 @@ Car.prototype.update=function(msDuration){
         var incr=(this.max_steer_angle/200) * msDuration;
         
         if(this.steer==STEER_RIGHT){
-            this.wheel_angle=Math.min(Math.max(this.wheel_angle, 0)+incr, this.max_steer_angle) //increment angle without going over max steer
+            this.wheel_angle=Math.min(Math.max(this.wheel_angle, 0)+incr, this.max_steer_angle); //increment angle without going over max steer
         }else if(this.steer==STEER_LEFT){
-            this.wheel_angle=Math.max(Math.min(this.wheel_angle, 0)-incr, -this.max_steer_angle) //decrement angle without going over max steer
+            this.wheel_angle=Math.max(Math.min(this.wheel_angle, 0)-incr, -this.max_steer_angle); //decrement angle without going over max steer
         }else{
-            this.wheel_angle=0;        
+            //this.wheel_angle=0;      
+			if(this.wheel_angle > 0){
+				this.wheel_angle-=incr;
+				if(this.wheel_angle < 0) this.wheel_angle = 0;
+			}
+			if(this.wheel_angle < 0){
+				this.wheel_angle+=incr;
+				if(this.wheel_angle > 0) this.wheel_angle = 0;
+			}
         }
-
+		
+		function DegToRad(a){
+			return a * (Math.PI / 180);
+		}
+		
+		function RadToDeg(a){
+			return a * (180 / Math.PI);
+		}
+		
+		var steerAngle = DegToRad(Math.abs(this.wheel_angle)) ;
+		
+		var wheelze = this.wheels;
+		function AxleDistance(){
+			// assumes axles of same length, etc.
+			return Math.abs(wheelze[0].position[1]) * 2;
+		}
+		
+		function AxleLength(){
+			// assumes axles of same length, symmetrical around center, etc.
+			return Math.abs(wheelze[0].position[0]) * 2;
+		}
+		
+		var d = AxleDistance() / (2 * Math.tan(steerAngle + 0.01));
+		var angleOuter = Math.atan(AxleDistance() / (d + AxleLength() * 0.5));
+		var angleInner = Math.atan(AxleDistance() / (d - AxleLength() * 0.5));
+		
+		var sign = this.wheel_angle / (Math.abs(this.wheel_angle) + 0.01);
+		
+		var angleOuter_d = RadToDeg(angleOuter) * sign;
+		var angleInner_d = RadToDeg(angleInner) * sign;
+		
+		this.dbg = {
+			d: d,
+			angleOuter: angleOuter,
+			angleOuter_d: angleOuter_d,
+			angleInner: angleInner,
+			angleInner_d: angleInner_d,
+			sign: sign,
+			steerAngle: steerAngle,
+			wheel_angle: this.wheel_angle,
+			AxleDistance: AxleDistance(),
+			AxleLength: AxleLength()
+		};
+		
+		
         //update revolving wheels
         var wheels=this.getRevolvingWheels();
-        for(i=0;i<wheels.length;i++){
-            wheels[i].setAngle(this.wheel_angle);
-        }
+		
+		if(!this.ackermann){
+			for(i=0;i<wheels.length;i++){
+				wheels[i].setAngle(this.wheel_angle);
+			}
+		}
+		
+		var outerInner;
+		if(wheels[0].position.x > wheels[1].position.x) outerInner = [0, 1];
+		else outerInner = [1, 0];
+		if(this.wheel_angle < 0) outerInner.reverse();
+		
+		if(typeof(this.ackermann) == "boolean" && this.ackermann){
+			wheels[outerInner[1]].setAngle(angleOuter_d);
+			wheels[outerInner[0]].setAngle(angleInner_d);
+		}
+		else if(typeof(this.ackermann) == "number"){
+			wheels[outerInner[1]].setAngle(angleOuter_d * this.ackermann + this.wheel_angle * (1 - this.ackermann));
+			wheels[outerInner[0]].setAngle(angleInner_d * this.ackermann + this.wheel_angle * (1 - this.ackermann));
+		}
         
         //3. APPLY FORCE TO WHEELS
         var base_vect; //vector pointing in the direction force will be applied to a wheel ; relative to the wheel.
@@ -333,11 +408,12 @@ function main(){
     debugDraw.SetDrawScale(SCALE);
     debugDraw.SetFillAlpha(0.5);
     debugDraw.SetLineThickness(1.0);
-    debugDraw.SetFlags(box2d.b2DebugDraw.e_shapeBit);
+    debugDraw.SetFlags(box2d.b2DebugDraw.e_shapeBit | box2d.b2DebugDraw.e_jointBit);
     b2world.SetDebugDraw(debugDraw);
-    
+	
     //initialize car
-    var car=new Car({'width':2,
+	var carDef = {'width':2,
+					'ackermann': 0,
                     'length':4,
                     'position':[10, 10],
                     'angle':180, 
@@ -347,7 +423,14 @@ function main(){
                     'wheels':[{'x':-1, 'y':-1.2, 'width':0.4, 'length':0.8, 'revolving':true, 'powered':true}, //top left
                                 {'x':1, 'y':-1.2, 'width':0.4, 'length':0.8, 'revolving':true, 'powered':true}, //top right
                                 {'x':-1, 'y':1.2, 'width':0.4, 'length':0.8, 'revolving':false, 'powered':false}, //back left
-                                {'x':1, 'y':1.2, 'width':0.4, 'length':0.8, 'revolving':false, 'powered':false}]}); //back right
+                                {'x':1, 'y':1.2, 'width':0.4, 'length':0.8, 'revolving':false, 'powered':false}]}; //back right
+    cars=[];
+	for(var i = 0; i <= 1.0; i += 1){
+		carDef.ackermann = i;
+		var c = new Car(carDef);
+		cars.push(c);
+	}
+	var car;
     
     //initialize some props to bounce against
     var props=[];
@@ -366,7 +449,8 @@ function main(){
     
     function tick(msDuration) {
         //GAME LOOP
-        
+        for(var i = 0; i < cars.length; i++){
+		car = cars[i];
         //set car controls according to player input
         if(KEYS_DOWN[BINDINGS.accelerate]){
             car.accelerate=ACC_ACCELERATE;
@@ -400,8 +484,9 @@ function main(){
         b2world.DrawDebugData();
         
         //fps and car speed display
-        display.blit(font.render('FPS: '+parseInt((1000)/msDuration)), [25, 25]);
-        display.blit(font.render('SPEED: '+parseInt(Math.ceil(car.getSpeedKMH()))+' km/h'), [25, 55]);
+        //display.blit(font.render('FPS: '+parseInt((1000)/msDuration)), [25, 25]);
+        //display.blit(font.render('SPEED: '+parseInt(Math.ceil(car.getSpeedKMH()))+' km/h'), [25, 55]);
+		}
         return;
     };
     function handleEvent(event){
